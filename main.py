@@ -1,7 +1,7 @@
 import sys
 from PyQt5.QtWidgets import QApplication
 
-from gui import MainWindow
+from frontend.gui import MainWindow
 
 
 def main():
