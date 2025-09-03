@@ -13,12 +13,16 @@ class LiveStreamWidget(QWidget):
 
         # QLabel to display video frames
         self.image_label = QLabel(self)
-        self.image_label.resize(self.disply_width, self.display_height)
+        self.image_label.setFixedSize(self.disply_width, self.display_height)
         self.image_label.setStyleSheet(
             "border: 2px solid black; background-color: #333;"
         )
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setText("Connecting to stream...")
+
+        # Optionally set widget size constraints
+        self.setMinimumSize(self.disply_width, self.display_height)
+        self.setMaximumSize(self.disply_width, self.display_height)
 
         # Layout
         vbox = QVBoxLayout()
