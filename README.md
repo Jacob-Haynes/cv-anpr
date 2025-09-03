@@ -1,6 +1,6 @@
-# Watchkeeper - Automatic Number Plate Recognition (ANPR) System
+# Automatic Number Plate Recognition (ANPR) System
 
-Watchkeeper is a comprehensive license plate detection and recognition system built with Python with a PyQt5 frontend. It provides both video processing capabilities and live stream monitoring for automatic number plate recognition using advanced computer vision models.
+This is a comprehensive license plate detection and recognition system built with Python with a PyQt5 frontend. It provides both video processing capabilities and live stream monitoring for automatic number plate recognition using advanced computer vision models.
 
 ## Features
 
