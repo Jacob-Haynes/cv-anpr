@@ -2,6 +2,6 @@
 .idea
 .venv
 /output
-yolov8n.pt
-license-plate-recognition.pt
+cv/models/yolov8n.pt
+cv/models/license-plate-recognition.pt
 /videos/local_videos

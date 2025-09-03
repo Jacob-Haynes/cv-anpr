@@ -25,7 +25,7 @@ class VideoThread(QThread):
         self._run_flag = True
         self.rtsp_url = rtsp_url
         # Use the correct absolute model path for license plate recognition
-        model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "license-plate-recognition.pt")
+        model_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cv", "models", "license-plate-recognition.pt")
         self.detector = LicensePlateDetector(model_path=model_path)
         self.ocr = LicensePlateOCR()
         self.last_detection_time = 0

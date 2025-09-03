@@ -32,15 +32,15 @@ class LicensePlateDetector:
         elif use_license_plate_model:
             # Try to use a license plate specific model
             try:
-                # This will download a license plate specific model if available
-                self.model = YOLO("license-plate-recognition.pt")
+                # This will use license plate specific model if available
+                self.model = YOLO(os.path.join(os.path.dirname(os.path.dirname(__file__)), "cv", "models", "license-plate-recognition.pt"))
                 self.is_custom_model = True
             except:
                 # Fall back to general object detection
-                self.model = YOLO("yolov8n.pt")
+                self.model = YOLO(os.path.join(os.path.dirname(os.path.dirname(__file__)), "cv", "models", "yolov8n.pt"))
                 self.is_custom_model = False
         else:
-            # Use pre-trained YOLOv8n model
+            # download YOLOv8n model
             self.model = YOLO("yolov8n.pt")
             self.is_custom_model = False
 
