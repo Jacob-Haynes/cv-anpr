@@ -39,6 +39,7 @@ from frontend.ExportCSVConfigDialog import ExportCSVConfigDialog
 from frontend.VideoProcessingConfigDialog import VideoProcessingConfigDialog
 from frontend.VideoProcessingProgressDialog import VideoProcessingProgressDialog
 from frontend.VideoProcessingWorker import VideoProcessingWorker
+from frontend.s3_downloader_dialog import S3VideoDownloaderDialog
 from video_processing.data_processing import DataProcessor
 from frontend.live_stream_widget import LiveStreamWidget
 
@@ -432,137 +433,8 @@ class MainWindow(QMainWindow):
 
     def download_from_s3(self):
         """Show dialog to select and download video from S3 bucket."""
-        from PyQt5.QtWidgets import (
-            QDialog,
-            QVBoxLayout,
-            QListWidget,
-            QPushButton,
-            QHBoxLayout,
-            QLabel,
-            QProgressBar,
-            QMessageBox,
-        )
-        from PyQt5.QtCore import QObject, pyqtSignal
-        from videos.get_s3_videos import S3VideoDownloader
-        import threading
-        import traceback
-        from pathlib import Path
-
-        class S3DownloadWorker(QObject):
-            progress = pyqtSignal(
-                str, float, int, int
-            )  # filename, percent, downloaded, total
-            finished = pyqtSignal(bool, str)  # success, error message
-
-            def __init__(self, downloader, video_key, local_path):
-                super().__init__()
-                self.downloader = downloader
-                self.video_key = video_key
-                self.local_path = local_path
-                self.cancelled = False
-
-            def start(self):
-                def run():
-                    try:
-
-                        def callback(filename, percent, downloaded, total):
-                            self.progress.emit(filename, percent, downloaded, total)
-                            if self.cancelled:
-                                raise Exception("Download cancelled")
-
-                        self.downloader.download_video(
-                            self.video_key, self.local_path, callback
-                        )
-                        if not self.cancelled:
-                            self.finished.emit(True, "")
-                    except Exception as e:
-                        self.finished.emit(False, str(e))
-
-                threading.Thread(target=run, daemon=True).start()
-
-            def cancel(self):
-                self.cancelled = True
-
-        class S3VideoSelectDialog(QDialog):
-            def __init__(self, parent=None, video_list=None):
-                super().__init__(parent)
-                self.setWindowTitle("Select S3 Video to Download")
-                self.resize(500, 400)
-                layout = QVBoxLayout()
-                self.setLayout(layout)
-                self.list_widget = QListWidget()
-                if video_list:
-                    self.list_widget.addItems(video_list)
-                layout.addWidget(QLabel("Available S3 Videos:"))
-                layout.addWidget(self.list_widget)
-                button_layout = QHBoxLayout()
-                self.ok_button = QPushButton("Download")
-                self.cancel_button = QPushButton("Cancel")
-                button_layout.addWidget(self.ok_button)
-                button_layout.addWidget(self.cancel_button)
-                layout.addLayout(button_layout)
-                self.ok_button.clicked.connect(self.accept)
-                self.cancel_button.clicked.connect(self.reject)
-
-            def get_selected_video(self):
-                item = self.list_widget.currentItem()
-                return item.text() if item else None
-
-        # Step 1: List S3 videos
-        try:
-            downloader = S3VideoDownloader()
-            s3_videos = downloader.list_videos()
-        except Exception as e:
-            QMessageBox.warning(self, "S3 Error", f"Failed to list S3 videos:\n{e}")
-            return
-        # Step 2: Show selection dialog
-        dialog = S3VideoSelectDialog(self, s3_videos)
-        if dialog.exec_() != QDialog.Accepted:
-            return
-        selected_video = dialog.get_selected_video()
-        if not selected_video:
-            return
-        # Step 3: Download with progress bar (thread-safe)
-        progress_dialog = QDialog(self)
-        progress_dialog.setWindowTitle(f"Downloading {selected_video}")
-        progress_dialog.resize(400, 150)
-        vlayout = QVBoxLayout()
-        progress_dialog.setLayout(vlayout)
-        status_label = QLabel(f"Downloading: {selected_video}")
-        vlayout.addWidget(status_label)
-        progress_bar = QProgressBar()
-        progress_bar.setRange(0, 100)
-        vlayout.addWidget(progress_bar)
-        cancel_button = QPushButton("Cancel")
-        vlayout.addWidget(cancel_button)
-        # Worker setup
-        local_path = str(Path(LOCAL_VIDEOS_DIR) / Path(selected_video).name)
-        worker = S3DownloadWorker(downloader, selected_video, local_path)
-
-        def on_progress(filename, percent, downloaded, total):
-            progress_bar.setValue(int(percent))
-            status_label.setText(
-                f"{filename}: {percent:.1f}% ({downloaded//1024}KB/{total//1024}KB)"
-            )
-
-        def on_finished(success, error):
-            if success:
-                progress_dialog.accept()
-            else:
-                QMessageBox.warning(
-                    self, "Download Error", f"Failed to download:\n{error}"
-                )
-                progress_dialog.reject()
-
-        worker.progress.connect(on_progress)
-        worker.finished.connect(on_finished)
-        cancel_button.clicked.connect(
-            lambda: (worker.cancel(), progress_dialog.reject())
-        )
-        worker.start()
-        progress_dialog.exec_()
-        # Step 4: Refresh video list
-        self.load_video_list()
+        s3_downloader = S3VideoDownloaderDialog(self, LOCAL_VIDEOS_DIR)
+        s3_downloader.download_from_s3(on_complete_callback=self.load_video_list)
 
     def load_processed_video_list(self):
         self.processed_video_list.clear()
