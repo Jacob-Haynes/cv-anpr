@@ -9,7 +9,7 @@ This is a comprehensive license plate detection and recognition system built wit
 - **GUI Interface**: User-friendly PyQt5 interface for easy operation
 - **Batch Processing**: Process multiple videos with configurable parameters
 - **S3 Integration**: Download and process videos from S3-compatible storage
-- **Export Capabilities**: Export detection results to CSV format
+- **Export Capabilities**: Export detection results to CSV format with duplicate removal
 - **Advanced OCR**: Multiple OCR engines for accurate text extraction (EasyOCR has the best performance out the box, Tesseract as backup - with fine-tuning performance would be significantly better than EasyOCR)
 
 ## Computer Vision Models
