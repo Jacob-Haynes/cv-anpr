@@ -5,13 +5,11 @@ A PyQt5-based application for processing videos with license plate detection
 and OCR capabilities, featuring video playback with detection overlays.
 """
 
-import sys
 import os
 import json
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
-    QApplication,
     QMainWindow,
     QWidget,
     QVBoxLayout,
@@ -27,22 +25,20 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QSlider,
     QDialog,
-    QDialogButtonBox,
-    QProgressBar,
-    QSpinBox,
-    QDoubleSpinBox,
-    QTextEdit,
     QGraphicsView,
     QGraphicsScene,
     QGraphicsRectItem,
     QGraphicsSimpleTextItem,
 )
-from PyQt5.QtCore import Qt, QUrl, QTimer, QThread, pyqtSignal, QRectF, QSizeF
+from PyQt5.QtCore import Qt, QUrl, QTimer, QRectF, QSizeF
 from PyQt5.QtGui import QPixmap, QColor, QPainter, QPen, QFont
 from PyQt5.QtMultimedia import QMediaPlayer, QMediaContent
 from PyQt5.QtMultimediaWidgets import QGraphicsVideoItem
 
-from video_processing.video_pipeline import VideoProcessor
+from frontend.ExportCSVConfigDialog import ExportCSVConfigDialog
+from frontend.VideoProcessingConfigDialog import VideoProcessingConfigDialog
+from frontend.VideoProcessingProgressDialog import VideoProcessingProgressDialog
+from frontend.VideoProcessingWorker import VideoProcessingWorker
 from video_processing.data_processing import DataProcessor
 from frontend.live_stream_widget import LiveStreamWidget
 
@@ -79,404 +75,6 @@ DETECTION_INFO_STYLE = """
         font-size: 12px;
     }
 """
-
-
-class VideoProcessingWorker(QThread):
-    """Worker thread for video processing to prevent UI blocking"""
-
-    progress_updated = pyqtSignal(int, str)  # progress percentage, status message
-    processing_finished = pyqtSignal(str, bool)  # output_path, success
-    error_occurred = pyqtSignal(str)  # error message
-
-    def __init__(self, video_path, output_dir, config):
-        super().__init__()
-        self.video_path = video_path
-        self.output_dir = output_dir
-        self.config = config
-        self.processor = None
-
-    def run(self):
-        try:
-            self.progress_updated.emit(0, "Initializing video processor...")
-
-            # Create processor with config
-            self.processor = VideoProcessor(
-                detection_confidence=self.config["detection_confidence"],
-                ocr_confidence_threshold=self.config["ocr_confidence_threshold"],
-                frame_skip=self.config["frame_skip"],
-                output_base_dir=self.output_dir,
-            )
-
-            self.progress_updated.emit(5, "Opening video file...")
-
-            # Process the video with progress callback
-            results = self._process_video_with_progress()
-
-            self.progress_updated.emit(100, "Processing completed successfully!")
-            self.processing_finished.emit(self.output_dir, True)
-
-        except Exception as e:
-            error_msg = f"Error processing video: {str(e)}"
-            self.error_occurred.emit(error_msg)
-            self.processing_finished.emit(self.output_dir, False)
-
-    def _process_video_with_progress(self):
-        """Process video with detailed progress tracking"""
-        import cv2
-        from pathlib import Path
-
-        # Open video to get metadata
-        cap = cv2.VideoCapture(self.video_path)
-        if not cap.isOpened():
-            raise ValueError(f"Could not open video file: {self.video_path}")
-
-        try:
-            # Get video metadata
-            fps = cap.get(cv2.CAP_PROP_FPS)
-            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-            video_name = Path(self.video_path).name
-
-            self.progress_updated.emit(
-                8, f"Video: {video_name} ({total_frames} frames)"
-            )
-
-            frame_number = 0
-            processed_frames = 0
-            results = []
-
-            self.progress_updated.emit(10, "Starting frame processing...")
-
-            while True:
-                ret, frame = cap.read()
-                if not ret:
-                    break
-
-                # Process frames according to frame_skip
-                if frame_number % self.config["frame_skip"] == 0:
-                    timestamp = frame_number / fps if fps > 0 else frame_number
-
-                    # Process this frame using the original processor logic
-                    frame_results = self._process_frame_with_processor(
-                        frame, frame_number, timestamp
-                    )
-                    results.extend(frame_results)
-                    processed_frames += 1
-
-                frame_number += 1
-
-                # Update progress based on actual frame progress
-                if frame_number % 50 == 0 or frame_number == total_frames:
-                    progress_percent = min(
-                        90, int((frame_number / total_frames) * 80) + 10
-                    )
-                    frames_processed_text = f"Frame {frame_number}/{total_frames}"
-                    if processed_frames > 0:
-                        frames_processed_text += f" ({processed_frames} analyzed)"
-
-                    self.progress_updated.emit(progress_percent, frames_processed_text)
-
-        finally:
-            cap.release()
-
-        # Save results
-        self.progress_updated.emit(95, "Saving results...")
-        self._save_results(results)
-
-        return results
-
-    def _process_frame_with_processor(self, frame, frame_number, timestamp):
-        """Process a single frame using the video processor logic"""
-        import cv2
-        import numpy as np
-        from pathlib import Path
-
-        temp_frame_path = Path(self.output_dir) / f"temp_frame_{frame_number}.jpg"
-        frame_results = []
-
-        try:
-            # Save frame temporarily for detection
-            cv2.imwrite(str(temp_frame_path), frame)
-
-            # Detect license plates
-            detections = self.processor.detector.detect_license_plates(
-                str(temp_frame_path), confidence=self.config["detection_confidence"]
-            )
-
-            # Process each detected plate
-            for plate_idx, detection in enumerate(detections):
-                plate_result = self._process_detected_plate(
-                    frame, detection, frame_number, timestamp, plate_idx
-                )
-                if plate_result:
-                    frame_results.append(plate_result)
-
-        except Exception as e:
-            print(f"Error processing frame {frame_number}: {e}")
-        finally:
-            # Clean up temporary file
-            if temp_frame_path.exists():
-                temp_frame_path.unlink()
-
-        return frame_results
-
-    def _process_detected_plate(
-        self, frame, detection, frame_number, timestamp, plate_idx
-    ):
-        """Process a detected license plate"""
-        import cv2
-        from pathlib import Path
-
-        bbox = detection["bbox"]
-        confidence = detection["confidence"]
-        x1, y1, x2, y2 = bbox
-
-        # Extract license plate region with padding
-        padding = 10
-        h, w = frame.shape[:2]
-        x1_pad = max(0, x1 - padding)
-        y1_pad = max(0, y1 - padding)
-        x2_pad = min(w, x2 + padding)
-        y2_pad = min(h, y2 + padding)
-
-        cropped_plate = frame[y1_pad:y2_pad, x1_pad:x2_pad]
-
-        if cropped_plate.size == 0:
-            return None
-
-        # Save cropped plate
-        plate_filename = f"plate_f{frame_number:06d}_t{timestamp:.3f}_p{plate_idx}_conf{confidence:.2f}.jpg"
-        cropped_plates_dir = Path(self.output_dir) / "cropped_plates"
-        cropped_plates_dir.mkdir(exist_ok=True)
-        plate_path = cropped_plates_dir / plate_filename
-
-        cv2.imwrite(str(plate_path), cropped_plate)
-
-        # Perform OCR
-        ocr_result = self.processor.ocr.extract_text(str(plate_path))
-
-        # Extract VRN using improved logic
-        ocr_text = str(ocr_result.get("text", ""))
-        ocr_raw_text = str(ocr_result.get("raw_text", ""))
-        ocr_confidence = float(ocr_result.get("confidence", 0.0))
-        ocr_confidence_threshold = self.config.get("ocr_confidence_threshold", 50.0)
-
-        # Improved VRN extraction logic
-        vrn = ""
-
-        # Primary: Use cleaned OCR text if it meets confidence threshold
-        if ocr_text and ocr_confidence >= ocr_confidence_threshold:
-            vrn = ocr_text
-        # Secondary: Use cleaned raw text if main text is empty but raw text exists and meets threshold
-        elif ocr_raw_text and ocr_confidence >= ocr_confidence_threshold:
-            # Clean the raw text: remove spaces, convert to uppercase, keep only alphanumeric
-            cleaned_raw = ''.join(c for c in ocr_raw_text.upper().replace(' ', '') if c.isalnum())
-            if len(cleaned_raw) >= 2:  # At least 2 characters for a potential VRN
-                vrn = cleaned_raw
-        # Tertiary: If confidence is lower but text exists, still try to extract if it looks reasonable
-        elif (ocr_text or ocr_raw_text) and ocr_confidence >= 30.0:  # Lower threshold for fallback
-            text_to_clean = ocr_text if ocr_text else ocr_raw_text
-            cleaned_fallback = ''.join(c for c in text_to_clean.upper().replace(' ', '') if c.isalnum())
-            if len(cleaned_fallback) >= 3:  # Slightly higher requirement for lower confidence
-                vrn = cleaned_fallback
-
-        # Create result entry
-        result = {
-            "frame_number": frame_number,
-            "timestamp": timestamp,
-            "bbox": [x1, y1, x2, y2],
-            "detection_confidence": confidence,
-            "cropped_plate_path": str(plate_path.relative_to(Path(self.output_dir))),
-            "vrn": vrn,
-            "raw_ocr_text": ocr_raw_text,
-            "ocr_confidence": ocr_confidence,
-        }
-
-        return result
-
-    def _save_results(self, results):
-        """Save results to JSON file"""
-        import json
-        from pathlib import Path
-        from datetime import datetime
-
-        output_data = {
-            "video_path": self.video_path,
-            "processing_timestamp": datetime.now().isoformat(),
-            "configuration": self.config,
-            "total_detections": len(results),
-            "results": results,
-        }
-
-        results_path = Path(self.output_dir) / "results.json"
-        with open(results_path, "w") as f:
-            json.dump(output_data, f, indent=2)
-
-
-class VideoProcessingConfigDialog(QDialog):
-    """Dialog for configuring video processing parameters"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Video Processing Configuration")
-        self.setModal(True)
-        self.resize(400, 300)
-
-        # Create layout
-        layout = QVBoxLayout()
-        self.setLayout(layout)
-
-        # Configuration form
-        form_layout = QFormLayout()
-
-        # Detection confidence
-        self.detection_confidence = QDoubleSpinBox()
-        self.detection_confidence.setRange(0.1, 1.0)
-        self.detection_confidence.setValue(0.5)
-        self.detection_confidence.setSingleStep(0.1)
-        self.detection_confidence.setDecimals(1)
-        form_layout.addRow("Detection Confidence:", self.detection_confidence)
-
-        # OCR confidence threshold
-        self.ocr_confidence = QDoubleSpinBox()
-        self.ocr_confidence.setRange(0.0, 100.0)
-        self.ocr_confidence.setValue(50.0)
-        self.ocr_confidence.setSingleStep(5.0)
-        self.ocr_confidence.setDecimals(1)
-        form_layout.addRow("OCR Confidence Threshold:", self.ocr_confidence)
-
-        # Frame skip
-        self.frame_skip = QSpinBox()
-        self.frame_skip.setRange(1, 1000)
-        self.frame_skip.setValue(30)
-        form_layout.addRow("Frame Skip (process every Nth frame):", self.frame_skip)
-
-        layout.addLayout(form_layout)
-
-        # Add description
-        description = QLabel(
-            "Configuration Help:\n"
-            "• Detection Confidence: Higher values = fewer but more accurate detections\n"
-            "• OCR Confidence: Minimum confidence for text recognition\n"
-            "• Frame Skip: Higher values = faster processing but may miss plates"
-        )
-        description.setWordWrap(True)
-        description.setStyleSheet("color: gray; font-size: 11px;")
-        layout.addWidget(description)
-
-        # Buttons
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
-
-    def get_config(self):
-        """Return the configuration as a dictionary"""
-        return {
-            "detection_confidence": self.detection_confidence.value(),
-            "ocr_confidence_threshold": self.ocr_confidence.value(),
-            "frame_skip": self.frame_skip.value(),
-        }
-
-
-class VideoProcessingProgressDialog(QDialog):
-    """Dialog showing video processing progress"""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Processing Video...")
-        self.setModal(True)
-        self.resize(500, 200)
-
-        # Prevent closing during processing
-        self.setWindowFlags(Qt.Dialog | Qt.CustomizeWindowHint | Qt.WindowTitleHint)
-
-        layout = QVBoxLayout()
-        self.setLayout(layout)
-
-        # Status label
-        self.status_label = QLabel("Initializing...")
-        layout.addWidget(self.status_label)
-
-        # Progress bar
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setRange(0, 100)
-        self.progress_bar.setValue(0)
-        layout.addWidget(self.progress_bar)
-
-        # Log output
-        self.log_output = QTextEdit()
-        self.log_output.setReadOnly(True)
-        self.log_output.setMaximumHeight(100)
-        layout.addWidget(self.log_output)
-
-        # Cancel button (initially hidden)
-        self.cancel_button = QPushButton("Cancel")
-        self.cancel_button.hide()
-        layout.addWidget(self.cancel_button)
-
-        self.processing_complete = False
-
-    def update_progress(self, percentage, message):
-        """Update progress bar and status"""
-        self.progress_bar.setValue(percentage)
-        self.status_label.setText(message)
-        self.log_output.append(f"{percentage}%: {message}")
-
-        # Auto-scroll to bottom
-        scrollbar = self.log_output.verticalScrollBar()
-        scrollbar.setValue(scrollbar.maximum())
-
-    def show_error(self, error_message):
-        """Show error message"""
-        self.status_label.setText("Error occurred!")
-        self.log_output.append(f"ERROR: {error_message}")
-        self.cancel_button.setText("Close")
-        self.cancel_button.show()
-        self.processing_complete = True
-
-    def processing_finished(self, success):
-        """Handle processing completion"""
-        if success:
-            self.status_label.setText("Processing completed successfully!")
-            self.progress_bar.setValue(100)
-        else:
-            self.status_label.setText("Processing failed!")
-
-        self.cancel_button.setText("Close")
-        self.cancel_button.show()
-        self.processing_complete = True
-
-
-class ExportCSVConfigDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Export to CSV Options")
-        self.setModal(True)
-        self.resize(300, 150)
-        layout = QVBoxLayout()
-        self.setLayout(layout)
-        form_layout = QFormLayout()
-        self.dedup_window = QDoubleSpinBox()
-        self.dedup_window.setRange(0.0, 60.0)
-        self.dedup_window.setValue(5.0)
-        self.dedup_window.setSingleStep(0.5)
-        form_layout.addRow("Dedup Window (seconds):", self.dedup_window)
-        self.min_confidence = QDoubleSpinBox()
-        self.min_confidence.setRange(0.0, 1.0)
-        self.min_confidence.setValue(0.3)
-        self.min_confidence.setSingleStep(0.05)
-        form_layout.addRow("Min Confidence:", self.min_confidence)
-        layout.addLayout(form_layout)
-        button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        button_box.accepted.connect(self.accept)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
-
-    def get_config(self):
-        return {
-            "dedup_window": self.dedup_window.value(),
-            "min_confidence": self.min_confidence.value(),
-        }
 
 
 class MainWindow(QMainWindow):
@@ -704,7 +302,7 @@ class MainWindow(QMainWindow):
     def parse_time(self, time_str):
         """Parse time string (MM:SS or HH:MM:SS) back to seconds"""
         try:
-            parts = time_str.split(':')
+            parts = time_str.split(":")
             if len(parts) == 2:  # MM:SS format
                 minutes, seconds = map(int, parts)
                 return minutes * 60 + seconds
@@ -834,7 +432,16 @@ class MainWindow(QMainWindow):
 
     def download_from_s3(self):
         """Show dialog to select and download video from S3 bucket."""
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout, QLabel, QProgressBar, QMessageBox
+        from PyQt5.QtWidgets import (
+            QDialog,
+            QVBoxLayout,
+            QListWidget,
+            QPushButton,
+            QHBoxLayout,
+            QLabel,
+            QProgressBar,
+            QMessageBox,
+        )
         from PyQt5.QtCore import QObject, pyqtSignal
         from videos.get_s3_videos import S3VideoDownloader
         import threading
@@ -842,7 +449,9 @@ class MainWindow(QMainWindow):
         from pathlib import Path
 
         class S3DownloadWorker(QObject):
-            progress = pyqtSignal(str, float, int, int)  # filename, percent, downloaded, total
+            progress = pyqtSignal(
+                str, float, int, int
+            )  # filename, percent, downloaded, total
             finished = pyqtSignal(bool, str)  # success, error message
 
             def __init__(self, downloader, video_key, local_path):
@@ -855,15 +464,20 @@ class MainWindow(QMainWindow):
             def start(self):
                 def run():
                     try:
+
                         def callback(filename, percent, downloaded, total):
                             self.progress.emit(filename, percent, downloaded, total)
                             if self.cancelled:
                                 raise Exception("Download cancelled")
-                        self.downloader.download_video(self.video_key, self.local_path, callback)
+
+                        self.downloader.download_video(
+                            self.video_key, self.local_path, callback
+                        )
                         if not self.cancelled:
                             self.finished.emit(True, "")
                     except Exception as e:
                         self.finished.emit(False, str(e))
+
                 threading.Thread(target=run, daemon=True).start()
 
             def cancel(self):
@@ -889,9 +503,11 @@ class MainWindow(QMainWindow):
                 layout.addLayout(button_layout)
                 self.ok_button.clicked.connect(self.accept)
                 self.cancel_button.clicked.connect(self.reject)
+
             def get_selected_video(self):
                 item = self.list_widget.currentItem()
                 return item.text() if item else None
+
         # Step 1: List S3 videos
         try:
             downloader = S3VideoDownloader()
@@ -922,18 +538,27 @@ class MainWindow(QMainWindow):
         # Worker setup
         local_path = str(Path(LOCAL_VIDEOS_DIR) / Path(selected_video).name)
         worker = S3DownloadWorker(downloader, selected_video, local_path)
+
         def on_progress(filename, percent, downloaded, total):
             progress_bar.setValue(int(percent))
-            status_label.setText(f"{filename}: {percent:.1f}% ({downloaded//1024}KB/{total//1024}KB)")
+            status_label.setText(
+                f"{filename}: {percent:.1f}% ({downloaded//1024}KB/{total//1024}KB)"
+            )
+
         def on_finished(success, error):
             if success:
                 progress_dialog.accept()
             else:
-                QMessageBox.warning(self, "Download Error", f"Failed to download:\n{error}")
+                QMessageBox.warning(
+                    self, "Download Error", f"Failed to download:\n{error}"
+                )
                 progress_dialog.reject()
+
         worker.progress.connect(on_progress)
         worker.finished.connect(on_finished)
-        cancel_button.clicked.connect(lambda: (worker.cancel(), progress_dialog.reject()))
+        cancel_button.clicked.connect(
+            lambda: (worker.cancel(), progress_dialog.reject())
+        )
         worker.start()
         progress_dialog.exec_()
         # Step 4: Refresh video list
@@ -950,11 +575,19 @@ class MainWindow(QMainWindow):
     def show_video_widget(self):
         """Show the video widget and remove live stream widget if present."""
         if self.live_stream_widget:
-            self.live_stream_widget.close()
-            self.video_display_layout.removeWidget(self.live_stream_widget)
-            self.live_stream_widget.deleteLater()
-            self.live_stream_widget = None
+            # Properly close the live stream widget
+            try:
+                if hasattr(self.live_stream_widget, "thread"):
+                    self.live_stream_widget.thread.stop()
+                self.live_stream_widget.close()
+                self.video_display_layout.removeWidget(self.live_stream_widget)
+                self.live_stream_widget.deleteLater()
+                self.live_stream_widget = None
+            except RuntimeError:
+                # Widget already deleted
+                self.live_stream_widget = None
 
+        # Ensure graphics view is in the container
         if self.graphics_view.parent() != self.video_display_container:
             self.video_display_layout.addWidget(self.graphics_view)
 
@@ -964,26 +597,36 @@ class MainWindow(QMainWindow):
 
         # Show video controls and overlays
         self.video_controls_widget.show()
-        self.detection_info_label.show()
 
     def show_live_stream_widget(self):
         """Show the live stream widget and remove video widget if present."""
+        # Stop any current video playback
+        if self.media_player.state() == QMediaPlayer.PlayingState:
+            self.media_player.stop()
+
+        # Hide video widget
         if self.graphics_view.parent() == self.video_display_container:
             self.video_display_layout.removeWidget(self.graphics_view)
             self.graphics_view.hide()
             self.video_item.hide()
 
+        # Create live stream widget if it doesn't exist
         if not self.live_stream_widget:
-            rtsp_url = "rtsp://192.168.8.185:8554/cam"  # Configure as needed
-            self.live_stream_widget = LiveStreamWidget(rtsp_url)
-            self.video_display_layout.addWidget(self.live_stream_widget)
+            try:
+                rtsp_url = "rtsp://192.168.8.185:8554/cam"  # Configure as needed
+                self.live_stream_widget = LiveStreamWidget(rtsp_url)
+                self.video_display_layout.addWidget(self.live_stream_widget)
+            except Exception as e:
+                print(f"Error creating live stream widget: {e}")
+                # Fallback to video widget
+                self.show_video_widget()
+                return
 
         self.live_stream_widget.show()
         self.is_live_stream_mode = True
 
         # Hide video controls and overlays for live stream
         self.video_controls_widget.hide()
-        self.detection_info_label.hide()
 
     def is_datetime_timestamp(self, timestamp_str):
         """Check if timestamp is a datetime string (live stream format)"""
@@ -1157,7 +800,16 @@ class MainWindow(QMainWindow):
 
     def download_from_s3(self):
         """Show dialog to select and download video from S3 bucket."""
-        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout, QLabel, QProgressBar, QMessageBox
+        from PyQt5.QtWidgets import (
+            QDialog,
+            QVBoxLayout,
+            QListWidget,
+            QPushButton,
+            QHBoxLayout,
+            QLabel,
+            QProgressBar,
+            QMessageBox,
+        )
         from PyQt5.QtCore import QObject, pyqtSignal
         from videos.get_s3_videos import S3VideoDownloader
         import threading
@@ -1165,7 +817,9 @@ class MainWindow(QMainWindow):
         from pathlib import Path
 
         class S3DownloadWorker(QObject):
-            progress = pyqtSignal(str, float, int, int)  # filename, percent, downloaded, total
+            progress = pyqtSignal(
+                str, float, int, int
+            )  # filename, percent, downloaded, total
             finished = pyqtSignal(bool, str)  # success, error message
 
             def __init__(self, downloader, video_key, local_path):
@@ -1178,15 +832,20 @@ class MainWindow(QMainWindow):
             def start(self):
                 def run():
                     try:
+
                         def callback(filename, percent, downloaded, total):
                             self.progress.emit(filename, percent, downloaded, total)
                             if self.cancelled:
                                 raise Exception("Download cancelled")
-                        self.downloader.download_video(self.video_key, self.local_path, callback)
+
+                        self.downloader.download_video(
+                            self.video_key, self.local_path, callback
+                        )
                         if not self.cancelled:
                             self.finished.emit(True, "")
                     except Exception as e:
                         self.finished.emit(False, str(e))
+
                 threading.Thread(target=run, daemon=True).start()
 
             def cancel(self):
@@ -1212,9 +871,11 @@ class MainWindow(QMainWindow):
                 layout.addLayout(button_layout)
                 self.ok_button.clicked.connect(self.accept)
                 self.cancel_button.clicked.connect(self.reject)
+
             def get_selected_video(self):
                 item = self.list_widget.currentItem()
                 return item.text() if item else None
+
         # Step 1: List S3 videos
         try:
             downloader = S3VideoDownloader()
@@ -1245,18 +906,27 @@ class MainWindow(QMainWindow):
         # Worker setup
         local_path = str(Path(LOCAL_VIDEOS_DIR) / Path(selected_video).name)
         worker = S3DownloadWorker(downloader, selected_video, local_path)
+
         def on_progress(filename, percent, downloaded, total):
             progress_bar.setValue(int(percent))
-            status_label.setText(f"{filename}: {percent:.1f}% ({downloaded//1024}KB/{total//1024}KB)")
+            status_label.setText(
+                f"{filename}: {percent:.1f}% ({downloaded//1024}KB/{total//1024}KB)"
+            )
+
         def on_finished(success, error):
             if success:
                 progress_dialog.accept()
             else:
-                QMessageBox.warning(self, "Download Error", f"Failed to download:\n{error}")
+                QMessageBox.warning(
+                    self, "Download Error", f"Failed to download:\n{error}"
+                )
                 progress_dialog.reject()
+
         worker.progress.connect(on_progress)
         worker.finished.connect(on_finished)
-        cancel_button.clicked.connect(lambda: (worker.cancel(), progress_dialog.reject()))
+        cancel_button.clicked.connect(
+            lambda: (worker.cancel(), progress_dialog.reject())
+        )
         worker.start()
         progress_dialog.exec_()
         # Step 4: Refresh video list
@@ -1273,11 +943,19 @@ class MainWindow(QMainWindow):
     def show_video_widget(self):
         """Show the video widget and remove live stream widget if present."""
         if self.live_stream_widget:
-            self.live_stream_widget.close()
-            self.video_display_layout.removeWidget(self.live_stream_widget)
-            self.live_stream_widget.deleteLater()
-            self.live_stream_widget = None
+            # Properly close the live stream widget
+            try:
+                if hasattr(self.live_stream_widget, "thread"):
+                    self.live_stream_widget.thread.stop()
+                self.live_stream_widget.close()
+                self.video_display_layout.removeWidget(self.live_stream_widget)
+                self.live_stream_widget.deleteLater()
+                self.live_stream_widget = None
+            except RuntimeError:
+                # Widget already deleted
+                self.live_stream_widget = None
 
+        # Ensure graphics view is in the container
         if self.graphics_view.parent() != self.video_display_container:
             self.video_display_layout.addWidget(self.graphics_view)
 
@@ -1287,26 +965,36 @@ class MainWindow(QMainWindow):
 
         # Show video controls and overlays
         self.video_controls_widget.show()
-        self.detection_info_label.show()
 
     def show_live_stream_widget(self):
         """Show the live stream widget and remove video widget if present."""
+        # Stop any current video playback
+        if self.media_player.state() == QMediaPlayer.PlayingState:
+            self.media_player.stop()
+
+        # Hide video widget
         if self.graphics_view.parent() == self.video_display_container:
             self.video_display_layout.removeWidget(self.graphics_view)
             self.graphics_view.hide()
             self.video_item.hide()
 
+        # Create live stream widget if it doesn't exist
         if not self.live_stream_widget:
-            rtsp_url = "rtsp://192.168.8.185:8554/cam"  # Configure as needed
-            self.live_stream_widget = LiveStreamWidget(rtsp_url)
-            self.video_display_layout.addWidget(self.live_stream_widget)
+            try:
+                rtsp_url = "rtsp://192.168.8.185:8554/cam"  # Configure as needed
+                self.live_stream_widget = LiveStreamWidget(rtsp_url)
+                self.video_display_layout.addWidget(self.live_stream_widget)
+            except Exception as e:
+                print(f"Error creating live stream widget: {e}")
+                # Fallback to video widget
+                self.show_video_widget()
+                return
 
         self.live_stream_widget.show()
         self.is_live_stream_mode = True
 
         # Hide video controls and overlays for live stream
         self.video_controls_widget.hide()
-        self.detection_info_label.hide()
 
     def is_datetime_timestamp(self, timestamp_str):
         """Check if timestamp is a datetime string (live stream format)"""
@@ -1436,7 +1124,9 @@ class MainWindow(QMainWindow):
 
             # Format timestamp using the enhanced format function
             timestamp_formatted = self.format_timestamp_for_display(timestamp)
-            conf_formatted = f"{float(detection_conf):.2f}" if detection_conf else "0.00"
+            conf_formatted = (
+                f"{float(detection_conf):.2f}" if detection_conf else "0.00"
+            )
 
             # VRN column (editable)
             vrn_item = QTableWidgetItem(str(vrn))
@@ -1529,6 +1219,7 @@ class MainWindow(QMainWindow):
             print(f"Error saving results: {e}")
             # Show error dialog to user for better UX
             from PyQt5.QtWidgets import QMessageBox
+
             QMessageBox.warning(self, "Save Error", f"Failed to save results: {e}")
 
     def on_result_cell_clicked(self, row, col):
@@ -1557,11 +1248,15 @@ class MainWindow(QMainWindow):
             if self.is_datetime_timestamp(str(exact_timestamp)):
                 return
 
-            print(f"Using exact timestamp {exact_timestamp:.3f}s from detection data for row {row}")
+            print(
+                f"Using exact timestamp {exact_timestamp:.3f}s from detection data for row {row}"
+            )
         else:
             # Fallback to parsing the formatted timestamp
             exact_timestamp = self.parse_time(timestamp_item.text())
-            print(f"Fallback: parsed timestamp {exact_timestamp:.3f}s from formatted display")
+            print(
+                f"Fallback: parsed timestamp {exact_timestamp:.3f}s from formatted display"
+            )
 
         self._seek_to_timestamp(exact_timestamp)
 
@@ -1612,9 +1307,11 @@ class MainWindow(QMainWindow):
 
     def _handle_media_loaded_for_seek(self, status):
         """Handle media loaded event when seeking to timestamp."""
-        if (status == QMediaPlayer.LoadedMedia and
-            hasattr(self, "is_seeking_to_timestamp") and
-            self.is_seeking_to_timestamp):
+        if (
+            status == QMediaPlayer.LoadedMedia
+            and hasattr(self, "is_seeking_to_timestamp")
+            and self.is_seeking_to_timestamp
+        ):
 
             # Disconnect this handler
             self._disconnect_media_status_safely()
@@ -1624,7 +1321,6 @@ class MainWindow(QMainWindow):
 
             # Execute the seek after a brief delay
             QTimer.singleShot(100, self.execute_timestamp_seek)
-
 
     def execute_timestamp_seek(self):
         """Execute the timestamp seeking with video fitting and pause/resume functionality"""
@@ -1642,9 +1338,11 @@ class MainWindow(QMainWindow):
 
     def _validate_seeking_state(self):
         """Validate that we have the necessary state for seeking."""
-        return (hasattr(self, "pending_timestamp") and
-                hasattr(self, "is_seeking_to_timestamp") and
-                self.is_seeking_to_timestamp)
+        return (
+            hasattr(self, "pending_timestamp")
+            and hasattr(self, "is_seeking_to_timestamp")
+            and self.is_seeking_to_timestamp
+        )
 
     def _cleanup_seeking_state(self):
         """Clean up seeking state variables."""
@@ -1669,14 +1367,16 @@ class MainWindow(QMainWindow):
 
         if not self._is_media_ready_for_seeking():
             print(f"Media not ready yet, retry {retry_count + 1}")
-            QTimer.singleShot(RETRY_DELAY_MS,
-                            lambda: self._fit_and_seek(timestamp, retry_count + 1))
+            QTimer.singleShot(
+                RETRY_DELAY_MS, lambda: self._fit_and_seek(timestamp, retry_count + 1)
+            )
             return
 
         if not self._is_video_size_available():
             print(f"Video native size empty, retrying... (attempt {retry_count + 1})")
-            QTimer.singleShot(RETRY_DELAY_MS,
-                            lambda: self._fit_and_seek(timestamp, retry_count + 1))
+            QTimer.singleShot(
+                RETRY_DELAY_MS, lambda: self._fit_and_seek(timestamp, retry_count + 1)
+            )
             return
 
         # Media is ready, proceed with fitting and seeking
@@ -1701,7 +1401,9 @@ class MainWindow(QMainWindow):
     def _setup_video_display(self):
         """Setup video display size and fitting."""
         native_size = self.video_item.nativeSize()
-        print(f"Video is ready, native size: {native_size.width()}x{native_size.height()}")
+        print(
+            f"Video is ready, native size: {native_size.width()}x{native_size.height()}"
+        )
 
         # Calculate target video size
         view_size = self.graphics_view.size()
@@ -1722,7 +1424,9 @@ class MainWindow(QMainWindow):
         start_time = max(0.0, timestamp - 1.0)  # 1 second before target
         start_time_ms = int(start_time * 1000)
 
-        print(f"Starting playback at {start_time:.3f}s, target timestamp {timestamp:.3f}s")
+        print(
+            f"Starting playback at {start_time:.3f}s, target timestamp {timestamp:.3f}s"
+        )
 
         # Seek and play
         self.media_player.setPosition(start_time_ms)
@@ -1745,7 +1449,9 @@ class MainWindow(QMainWindow):
 
     def _monitor_position(self):
         """Monitor video position and pause at target timestamp."""
-        if not hasattr(self, "seeking_target_timestamp") or getattr(self, "seeking_paused", False):
+        if not hasattr(self, "seeking_target_timestamp") or getattr(
+            self, "seeking_paused", False
+        ):
             return
 
         current_position_ms = self.media_player.position()
@@ -1768,7 +1474,12 @@ class MainWindow(QMainWindow):
         self.seeking_paused = True
 
         # Show detection overlay after short delay to allow frame update
-        QTimer.singleShot(150, lambda: self.show_detection_at_timestamp(self.seeking_target_timestamp, duration=5000))
+        QTimer.singleShot(
+            150,
+            lambda: self.show_detection_at_timestamp(
+                self.seeking_target_timestamp, duration=5000
+            ),
+        )
 
         # Schedule resume after 3 seconds
         QTimer.singleShot(3000, self._resume_playback_after_seek)
@@ -1788,13 +1499,13 @@ class MainWindow(QMainWindow):
         variables_to_clean = [
             "seeking_target_timestamp",
             "seeking_paused",
-            "position_monitor_timer"
+            "position_monitor_timer",
         ]
 
         for var_name in variables_to_clean:
             if hasattr(self, var_name):
                 attr = getattr(self, var_name)
-                if hasattr(attr, 'stop'):  # For timers
+                if hasattr(attr, "stop"):  # For timers
                     attr.stop()
                 delattr(self, var_name)
 
@@ -1812,7 +1523,10 @@ class MainWindow(QMainWindow):
         self.total_time_label.setText(self.format_time(total_time))
 
         # Don't show automatic detections if we're currently showing a selected timestamp detection
-        if hasattr(self, "showing_selected_detection") and self.showing_selected_detection:
+        if (
+            hasattr(self, "showing_selected_detection")
+            and self.showing_selected_detection
+        ):
             return
 
         # Find detections within a wider time window to catch overlapping/close detections
@@ -1834,7 +1548,9 @@ class MainWindow(QMainWindow):
             # Show VRN in the detection info label and bounding boxes
             vrns = [box["vrn"] for box in boxes_to_show if box["vrn"]]
             if vrns:
-                self.detection_info_label.setText(f"Detected ({len(boxes_to_show)}): {', '.join(vrns)}")
+                self.detection_info_label.setText(
+                    f"Detected ({len(boxes_to_show)}): {', '.join(vrns)}"
+                )
                 self.detection_info_label.show()
             # Update overlay with new boxes
             self.update_bounding_boxes(boxes_to_show)
@@ -1846,7 +1562,7 @@ class MainWindow(QMainWindow):
         else:
             # Only clear if no detections AND we're not in a "grace period" after showing detections
             # This prevents flickering when detections are close together
-            if not hasattr(self, '_last_detection_time'):
+            if not hasattr(self, "_last_detection_time"):
                 self._last_detection_time = 0
 
             # If we just showed detections recently, don't clear immediately
@@ -1867,32 +1583,48 @@ class MainWindow(QMainWindow):
         boxes_to_show = []
 
         # If we have a specific row selected, prioritize showing that detection
-        if hasattr(self, 'selected_detection_row') and self.selected_detection_row is not None:
+        if (
+            hasattr(self, "selected_detection_row")
+            and self.selected_detection_row is not None
+        ):
             # Show the specific detection from the clicked row
-            if (self.selected_detection_row < len(self.current_results_data) and
-                self.selected_detection_row < len(self.detections)):
+            if self.selected_detection_row < len(
+                self.current_results_data
+            ) and self.selected_detection_row < len(self.detections):
 
                 # Use the detection from current_results_data (which matches table display)
-                selected_detection = self.current_results_data[self.selected_detection_row]
+                selected_detection = self.current_results_data[
+                    self.selected_detection_row
+                ]
                 det_timestamp = selected_detection.get("timestamp", 0.0)
 
                 # Only show if timestamps are close (within 0.5 seconds for more tolerance)
                 if abs(det_timestamp - timestamp) < 0.5:
-                    boxes_to_show.append({
-                        "bbox": selected_detection.get("bbox", [0, 0, 0, 0]),
-                        "vrn": selected_detection.get("vrn", ""),
-                        "color": QColor(0, 255, 0, 200),  # Green for selected detection
-                    })
-                    print(f"Showing specific detection from row {self.selected_detection_row}: VRN={selected_detection.get('vrn', '')}")
+                    boxes_to_show.append(
+                        {
+                            "bbox": selected_detection.get("bbox", [0, 0, 0, 0]),
+                            "vrn": selected_detection.get("vrn", ""),
+                            "color": QColor(
+                                0, 255, 0, 200
+                            ),  # Green for selected detection
+                        }
+                    )
+                    print(
+                        f"Showing specific detection from row {self.selected_detection_row}: VRN={selected_detection.get('vrn', '')}"
+                    )
                 else:
-                    print(f"Selected detection timestamp {det_timestamp:.3f}s doesn't match target {timestamp:.3f}s")
+                    print(
+                        f"Selected detection timestamp {det_timestamp:.3f}s doesn't match target {timestamp:.3f}s"
+                    )
 
             # Clear the selection after use
             self.selected_detection_row = None
 
         # If no specific selection found, fall back to timestamp matching
         if not boxes_to_show:
-            print(f"No specific selection, searching for detections near timestamp {timestamp:.3f}s")
+            print(
+                f"No specific selection, searching for detections near timestamp {timestamp:.3f}s"
+            )
             for det in self.detections:
                 ts = det.get("timestamp", 0.0)
                 if abs(ts - timestamp) < 0.1:  # Within 0.1 seconds
@@ -1900,7 +1632,9 @@ class MainWindow(QMainWindow):
                         {
                             "bbox": det.get("bbox", [0, 0, 0, 0]),
                             "vrn": det.get("vrn", ""),
-                            "color": QColor(0, 255, 0, 200),  # Green for selected detection
+                            "color": QColor(
+                                0, 255, 0, 200
+                            ),  # Green for selected detection
                         }
                     )
 
@@ -1910,7 +1644,9 @@ class MainWindow(QMainWindow):
             self.detection_info_label.show()
 
             # Add a small delay before showing overlay to ensure video frame has updated
-            QTimer.singleShot(250, lambda: self._show_overlay_with_delay(boxes_to_show, duration))
+            QTimer.singleShot(
+                250, lambda: self._show_overlay_with_delay(boxes_to_show, duration)
+            )
         else:
             # Keep the label visible but clear the text when no detection
             self.detection_info_label.setText("No detection at this timestamp")
@@ -1949,7 +1685,7 @@ class MainWindow(QMainWindow):
         self.hide_overlay()
         self.clear_bounding_boxes()
         # Reset any seeking-related flags
-        if hasattr(self, 'showing_selected_detection'):
+        if hasattr(self, "showing_selected_detection"):
             self.showing_selected_detection = False
 
     def set_position(self, position):
@@ -2034,7 +1770,10 @@ class MainWindow(QMainWindow):
     def cancel_processing(self):
         """Cancel the video processing"""
         try:
-            if hasattr(self, "processing_worker") and self.processing_worker is not None:
+            if (
+                hasattr(self, "processing_worker")
+                and self.processing_worker is not None
+            ):
                 if self.processing_worker.isRunning():
                     self.processing_worker.terminate()
                     self.processing_worker.wait()
@@ -2133,7 +1872,6 @@ class MainWindow(QMainWindow):
             scaled_x2 = x2 * scale_x + video_pos.x() + x_offset
             scaled_y2 = y2 * scale_y + video_pos.y() + y_offset
 
-
             scaled_width = scaled_x2 - scaled_x1
             scaled_height = scaled_y2 - scaled_y1
 
@@ -2177,6 +1915,7 @@ class MainWindow(QMainWindow):
     def export_results_to_csv(self):
         """Export the current processed results to CSV using DataProcessor."""
         from PyQt5.QtWidgets import QMessageBox
+
         selected = self.processed_video_list.currentItem()
         if not selected:
             QMessageBox.warning(self, "Export Error", "No processed video selected.")
@@ -2184,7 +1923,9 @@ class MainWindow(QMainWindow):
         video_dir = Path(OUTPUT_DIR) / selected.text()
         results_path = video_dir / RESULTS_JSON
         if not results_path.exists():
-            QMessageBox.warning(self, "Export Error", f"Results file not found: {results_path}")
+            QMessageBox.warning(
+                self, "Export Error", f"Results file not found: {results_path}"
+            )
             return
         # Show dialog for dedup_window and min_confidence
         dialog = ExportCSVConfigDialog(self)
@@ -2195,20 +1936,12 @@ class MainWindow(QMainWindow):
             processor = DataProcessor(
                 dedup_window_seconds=config["dedup_window"],
                 min_confidence=config["min_confidence"],
-                output_dir=str(video_dir)
+                output_dir=str(video_dir),
             )
             df = processor.process_video_results(str(results_path))
             csv_path = processor.save_to_csv()
-            QMessageBox.information(self, "Export Successful", f"CSV exported to:\n{csv_path}")
+            QMessageBox.information(
+                self, "Export Successful", f"CSV exported to:\n{csv_path}"
+            )
         except Exception as e:
             QMessageBox.warning(self, "Export Error", f"Failed to export CSV:\n{e}")
-
-def main():
-    app = QApplication(sys.argv)
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec_())
-
-
-if __name__ == "__main__":
-    main()

@@ -396,7 +396,9 @@ class VideoProcessor:
             vrn = ocr_text
         elif ocr_raw_text and ocr_confidence >= self.ocr_confidence_threshold:
             # Fallback: use raw text cleaned up if main text is empty but raw text exists
-            vrn = ''.join(c for c in ocr_raw_text.upper().replace(' ', '') if c.isalnum())
+            vrn = "".join(
+                c for c in ocr_raw_text.upper().replace(" ", "") if c.isalnum()
+            )
 
         return {
             "frame_number": int(frame_number),

@@ -3,6 +3,7 @@ from PyQt5.QtCore import Qt, pyqtSlot
 from PyQt5.QtGui import QPixmap
 from live_stream.live_video import VideoThread
 
+
 class LiveStreamWidget(QWidget):
     def __init__(self, rtsp_url, width=640, height=480, parent=None):
         super().__init__(parent)
@@ -13,7 +14,9 @@ class LiveStreamWidget(QWidget):
         # QLabel to display video frames
         self.image_label = QLabel(self)
         self.image_label.resize(self.disply_width, self.display_height)
-        self.image_label.setStyleSheet("border: 2px solid black; background-color: #333;")
+        self.image_label.setStyleSheet(
+            "border: 2px solid black; background-color: #333;"
+        )
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setText("Connecting to stream...")
 
@@ -33,5 +36,7 @@ class LiveStreamWidget(QWidget):
 
     @pyqtSlot(QPixmap)
     def update_image(self, p):
-        scaled_pixmap = p.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        scaled_pixmap = p.scaled(
+            self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
         self.image_label.setPixmap(scaled_pixmap)

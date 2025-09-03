@@ -317,7 +317,7 @@ class DataProcessor:
         cleaned = text.strip().upper()
 
         # Remove spaces and common OCR noise
-        cleaned = ''.join(c for c in cleaned if c.isalnum())
+        cleaned = "".join(c for c in cleaned if c.isalnum())
 
         # Basic UK license plate pattern validation
         # UK plates are typically 7 characters: 2 letters, 2 numbers, 3 letters
