@@ -1,0 +1,4 @@
+VIDEO_BUCKET="s3 bucket"
+KEY="s3 key"
+SECRET_KEY="s3 secret"
+RTSP_URL="rtsp url"
