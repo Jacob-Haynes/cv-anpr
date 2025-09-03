@@ -44,6 +44,7 @@ from PyQt5.QtMultimediaWidgets import QGraphicsVideoItem
 
 from video_processing.video_pipeline import VideoProcessor
 from video_processing.data_processing import DataProcessor
+from frontend.live_stream_widget import LiveStreamWidget
 
 # Constants
 LOCAL_VIDEOS_DIR = "videos/local_videos"
@@ -500,7 +501,17 @@ class MainWindow(QMainWindow):
         self.right_widget = QWidget()
         self.right_layout = QVBoxLayout()
         self.right_widget.setLayout(self.right_layout)
-        self.main_layout.addWidget(self.right_widget, 1)  # Takes 1/3 of space
+        self.main_layout.addWidget(self.right_widget, 1)
+
+        # Video display container for swapping between video and live stream
+        self.video_display_container = QWidget()
+        self.video_display_layout = QVBoxLayout()
+        self.video_display_container.setLayout(self.video_display_layout)
+        self.right_layout.addWidget(self.video_display_container)
+
+        # Live stream widget placeholder
+        self.live_stream_widget = None
+        self.is_live_stream_mode = False
 
         # Left side content
         self.video_list = QListWidget()
@@ -594,7 +605,7 @@ class MainWindow(QMainWindow):
 
         self.graphics_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
-        self.right_layout.addWidget(self.graphics_view)
+        self.video_display_layout.addWidget(self.graphics_view)
 
         # Create the video item which will be part of the scene
         self.video_item = QGraphicsVideoItem()
@@ -712,6 +723,9 @@ class MainWindow(QMainWindow):
             self.video_list.addItem(str(file.name))
 
     def play_selected_video(self):
+        # Always switch to video mode when playing a video
+        self.show_video_widget()
+
         selected = self.video_list.currentItem()
         if selected:
             video_path = Path(LOCAL_VIDEOS_DIR) / selected.text()
@@ -933,23 +947,425 @@ class MainWindow(QMainWindow):
                 if subdir.is_dir() and (subdir / RESULTS_JSON).exists():
                     self.processed_video_list.addItem(str(subdir.name))
 
+    def show_video_widget(self):
+        """Show the video widget and remove live stream widget if present."""
+        if self.live_stream_widget:
+            self.live_stream_widget.close()
+            self.video_display_layout.removeWidget(self.live_stream_widget)
+            self.live_stream_widget.deleteLater()
+            self.live_stream_widget = None
+
+        if self.graphics_view.parent() != self.video_display_container:
+            self.video_display_layout.addWidget(self.graphics_view)
+
+        self.graphics_view.show()
+        self.video_item.show()
+        self.is_live_stream_mode = False
+
+        # Show video controls and overlays
+        self.video_controls_widget.show()
+        self.detection_info_label.show()
+
+    def show_live_stream_widget(self):
+        """Show the live stream widget and remove video widget if present."""
+        if self.graphics_view.parent() == self.video_display_container:
+            self.video_display_layout.removeWidget(self.graphics_view)
+            self.graphics_view.hide()
+            self.video_item.hide()
+
+        if not self.live_stream_widget:
+            rtsp_url = "rtsp://192.168.8.185:8554/cam"  # Configure as needed
+            self.live_stream_widget = LiveStreamWidget(rtsp_url)
+            self.video_display_layout.addWidget(self.live_stream_widget)
+
+        self.live_stream_widget.show()
+        self.is_live_stream_mode = True
+
+        # Hide video controls and overlays for live stream
+        self.video_controls_widget.hide()
+        self.detection_info_label.hide()
+
+    def is_datetime_timestamp(self, timestamp_str):
+        """Check if timestamp is a datetime string (live stream format)"""
+        if isinstance(timestamp_str, str) and len(timestamp_str) > 10:
+            # Live stream timestamps look like "20250903_170647_158121"
+            return "_" in timestamp_str and timestamp_str.replace("_", "").isdigit()
+        return False
+
+    def format_timestamp_for_display(self, timestamp):
+        """Format timestamp for display - handle both numeric and datetime string formats"""
+        if isinstance(timestamp, str) and self.is_datetime_timestamp(timestamp):
+            # Parse datetime string format: "20250903_170647_158121"
+            try:
+                date_part = timestamp[:8]  # "20250903"
+                time_part = timestamp[9:15]  # "170647"
+
+                year = date_part[:4]
+                month = date_part[4:6]
+                day = date_part[6:8]
+                hour = time_part[:2]
+                minute = time_part[2:4]
+                second = time_part[4:6]
+
+                return f"{day}/{month}/{year} {hour}:{minute}:{second}"
+            except:
+                return str(timestamp)
+        else:
+            # Numeric timestamp in seconds
+            return self.format_time(float(timestamp)) if timestamp else "00:00"
+
     def load_results_for_selected_video(self):
         selected = self.processed_video_list.currentItem()
         if not selected:
             return
-        video_dir = Path(OUTPUT_DIR) / selected.text()
+
+        selected_name = selected.text()
+
+        # Check if this is live stream
+        if selected_name == "live_stream":
+            self.show_live_stream_widget()
+        else:
+            self.show_video_widget()
+
+        video_dir = Path(OUTPUT_DIR) / selected_name
         results_path = video_dir / RESULTS_JSON
         if not results_path.exists():
             return
+
         with open(results_path, "r") as f:
             data = json.load(f)
         results = data.get("results", [])
         self.detections = results
-        # Try to infer video size from first bbox
-        if results and "bbox" in results[0]:
+
+        # Try to infer video size from first bbox (only for non-live stream)
+        if results and "bbox" in results[0] and not self.is_live_stream_mode:
             max_x = max([b["bbox"][2] for b in results if "bbox" in b])
             max_y = max([b["bbox"][3] for b in results if "bbox" in b])
             self.video_native_size = (max_x, max_y)
+
+        self.display_results(results, video_dir)
+
+    def play_selected_video(self):
+        # Always switch to video mode when playing a video
+        self.show_video_widget()
+
+        selected = self.video_list.currentItem()
+        if selected:
+            video_path = Path(LOCAL_VIDEOS_DIR) / selected.text()
+            video_path = video_path.resolve()
+            if not video_path.is_file():
+                self.video_status_label.setText(f"Video file not found: {video_path}")
+                self.video_filename_label.setText("No video loaded.")
+                return
+
+            url = QUrl.fromLocalFile(str(video_path))
+            self.media_player.setMedia(QMediaContent(url))
+
+            # Better video fitting with proper sizing
+            def fit_video_to_view():
+                if not self.video_item.nativeSize().isEmpty():
+                    # Get the graphics view size
+                    view_size = self.graphics_view.size()
+                    print(
+                        f"DEBUG: Graphics view size: {view_size.width()}x{view_size.height()}"
+                    )
+
+                    # Set the video item to a much larger size
+                    target_width = min(
+                        view_size.width() - 20, 800
+                    )  # Leave some margin, max 800px
+                    target_height = int(
+                        target_width / (16 / 9)
+                    )  # Maintain 16:9 aspect ratio
+
+                    print(f"DEBUG: Target video size: {target_width}x{target_height}")
+
+                    # Set the video item size directly
+                    self.video_item.setSize(QSizeF(target_width, target_height))
+
+                    # Update scene rect to match the video item
+                    video_rect = self.video_item.boundingRect()
+                    self.graphics_scene.setSceneRect(video_rect)
+
+                    # Fit the view to show the entire video
+                    self.graphics_view.fitInView(video_rect, Qt.KeepAspectRatio)
+
+                    print(
+                        f"DEBUG: Final video rect: {video_rect.width()}x{video_rect.height()}"
+                    )
+                else:
+                    # Try again if video not ready
+                    QTimer.singleShot(200, fit_video_to_view)
+
+            # Use multiple timers to ensure video is properly fitted
+            QTimer.singleShot(100, fit_video_to_view)
+            QTimer.singleShot(500, fit_video_to_view)
+            QTimer.singleShot(1000, fit_video_to_view)  # Extra attempt
+
+            self.media_player.play()
+            self.video_status_label.setText(f"Playing: {video_path.name}")
+            self.video_filename_label.setText(f"Current video: {video_path.name}")
+        else:
+            self.video_status_label.setText("No video selected.")
+            self.video_filename_label.setText("No video loaded.")
+
+    def handle_media_status(self, status):
+        if status == QMediaPlayer.EndOfMedia:
+            self.video_status_label.setText("Playback finished.")
+            self.play_pause_button.setText("Play")
+        elif status == QMediaPlayer.LoadedMedia:
+            self.video_status_label.setText("Video loaded - ready to play.")
+        elif status == QMediaPlayer.InvalidMedia:
+            self.video_status_label.setText("Invalid video file or unsupported format.")
+        elif status == QMediaPlayer.NoMedia:
+            self.video_status_label.setText("No media loaded.")
+        elif status == QMediaPlayer.BufferingMedia:
+            self.video_status_label.setText("Buffering video...")
+        elif status == QMediaPlayer.StalledMedia:
+            # Don't show stalled message immediately, it's often temporary
+            if self.media_player.state() == QMediaPlayer.PlayingState:
+                current_video = self.video_filename_label.text()
+                if "Current video:" in current_video:
+                    video_name = current_video.replace("Current video: ", "")
+                    self.video_status_label.setText(f"Playing: {video_name}")
+                else:
+                    self.video_status_label.setText("Playing video...")
+            else:
+                self.video_status_label.setText("Video temporarily stalled.")
+        elif status == QMediaPlayer.LoadingMedia:
+            self.video_status_label.setText("Loading video...")
+        # else: keep previous status
+
+    def handle_media_error(self, error):
+        if error != QMediaPlayer.NoError:
+            self.video_status_label.setText(
+                f"Playback error: {self.media_player.errorString()}"
+            )
+
+    def upload_video(self):
+        file_dialog = QFileDialog(self)
+        file_dialog.setFileMode(QFileDialog.ExistingFile)
+        file_dialog.setNameFilter("Videos (*.mp4 *.avi *.mov)")
+        if file_dialog.exec_():
+            selected_files = file_dialog.selectedFiles()
+            for file_path in selected_files:
+                dest_path = Path(LOCAL_VIDEOS_DIR) / Path(file_path).name
+                os.makedirs(LOCAL_VIDEOS_DIR, exist_ok=True)
+                with open(file_path, "rb") as src, open(dest_path, "wb") as dst:
+                    dst.write(src.read())
+            self.load_video_list()
+
+    def download_from_s3(self):
+        """Show dialog to select and download video from S3 bucket."""
+        from PyQt5.QtWidgets import QDialog, QVBoxLayout, QListWidget, QPushButton, QHBoxLayout, QLabel, QProgressBar, QMessageBox
+        from PyQt5.QtCore import QObject, pyqtSignal
+        from videos.get_s3_videos import S3VideoDownloader
+        import threading
+        import traceback
+        from pathlib import Path
+
+        class S3DownloadWorker(QObject):
+            progress = pyqtSignal(str, float, int, int)  # filename, percent, downloaded, total
+            finished = pyqtSignal(bool, str)  # success, error message
+
+            def __init__(self, downloader, video_key, local_path):
+                super().__init__()
+                self.downloader = downloader
+                self.video_key = video_key
+                self.local_path = local_path
+                self.cancelled = False
+
+            def start(self):
+                def run():
+                    try:
+                        def callback(filename, percent, downloaded, total):
+                            self.progress.emit(filename, percent, downloaded, total)
+                            if self.cancelled:
+                                raise Exception("Download cancelled")
+                        self.downloader.download_video(self.video_key, self.local_path, callback)
+                        if not self.cancelled:
+                            self.finished.emit(True, "")
+                    except Exception as e:
+                        self.finished.emit(False, str(e))
+                threading.Thread(target=run, daemon=True).start()
+
+            def cancel(self):
+                self.cancelled = True
+
+        class S3VideoSelectDialog(QDialog):
+            def __init__(self, parent=None, video_list=None):
+                super().__init__(parent)
+                self.setWindowTitle("Select S3 Video to Download")
+                self.resize(500, 400)
+                layout = QVBoxLayout()
+                self.setLayout(layout)
+                self.list_widget = QListWidget()
+                if video_list:
+                    self.list_widget.addItems(video_list)
+                layout.addWidget(QLabel("Available S3 Videos:"))
+                layout.addWidget(self.list_widget)
+                button_layout = QHBoxLayout()
+                self.ok_button = QPushButton("Download")
+                self.cancel_button = QPushButton("Cancel")
+                button_layout.addWidget(self.ok_button)
+                button_layout.addWidget(self.cancel_button)
+                layout.addLayout(button_layout)
+                self.ok_button.clicked.connect(self.accept)
+                self.cancel_button.clicked.connect(self.reject)
+            def get_selected_video(self):
+                item = self.list_widget.currentItem()
+                return item.text() if item else None
+        # Step 1: List S3 videos
+        try:
+            downloader = S3VideoDownloader()
+            s3_videos = downloader.list_videos()
+        except Exception as e:
+            QMessageBox.warning(self, "S3 Error", f"Failed to list S3 videos:\n{e}")
+            return
+        # Step 2: Show selection dialog
+        dialog = S3VideoSelectDialog(self, s3_videos)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        selected_video = dialog.get_selected_video()
+        if not selected_video:
+            return
+        # Step 3: Download with progress bar (thread-safe)
+        progress_dialog = QDialog(self)
+        progress_dialog.setWindowTitle(f"Downloading {selected_video}")
+        progress_dialog.resize(400, 150)
+        vlayout = QVBoxLayout()
+        progress_dialog.setLayout(vlayout)
+        status_label = QLabel(f"Downloading: {selected_video}")
+        vlayout.addWidget(status_label)
+        progress_bar = QProgressBar()
+        progress_bar.setRange(0, 100)
+        vlayout.addWidget(progress_bar)
+        cancel_button = QPushButton("Cancel")
+        vlayout.addWidget(cancel_button)
+        # Worker setup
+        local_path = str(Path(LOCAL_VIDEOS_DIR) / Path(selected_video).name)
+        worker = S3DownloadWorker(downloader, selected_video, local_path)
+        def on_progress(filename, percent, downloaded, total):
+            progress_bar.setValue(int(percent))
+            status_label.setText(f"{filename}: {percent:.1f}% ({downloaded//1024}KB/{total//1024}KB)")
+        def on_finished(success, error):
+            if success:
+                progress_dialog.accept()
+            else:
+                QMessageBox.warning(self, "Download Error", f"Failed to download:\n{error}")
+                progress_dialog.reject()
+        worker.progress.connect(on_progress)
+        worker.finished.connect(on_finished)
+        cancel_button.clicked.connect(lambda: (worker.cancel(), progress_dialog.reject()))
+        worker.start()
+        progress_dialog.exec_()
+        # Step 4: Refresh video list
+        self.load_video_list()
+
+    def load_processed_video_list(self):
+        self.processed_video_list.clear()
+        output_dir = Path(OUTPUT_DIR)
+        if output_dir.exists():
+            for subdir in output_dir.iterdir():
+                if subdir.is_dir() and (subdir / RESULTS_JSON).exists():
+                    self.processed_video_list.addItem(str(subdir.name))
+
+    def show_video_widget(self):
+        """Show the video widget and remove live stream widget if present."""
+        if self.live_stream_widget:
+            self.live_stream_widget.close()
+            self.video_display_layout.removeWidget(self.live_stream_widget)
+            self.live_stream_widget.deleteLater()
+            self.live_stream_widget = None
+
+        if self.graphics_view.parent() != self.video_display_container:
+            self.video_display_layout.addWidget(self.graphics_view)
+
+        self.graphics_view.show()
+        self.video_item.show()
+        self.is_live_stream_mode = False
+
+        # Show video controls and overlays
+        self.video_controls_widget.show()
+        self.detection_info_label.show()
+
+    def show_live_stream_widget(self):
+        """Show the live stream widget and remove video widget if present."""
+        if self.graphics_view.parent() == self.video_display_container:
+            self.video_display_layout.removeWidget(self.graphics_view)
+            self.graphics_view.hide()
+            self.video_item.hide()
+
+        if not self.live_stream_widget:
+            rtsp_url = "rtsp://192.168.8.185:8554/cam"  # Configure as needed
+            self.live_stream_widget = LiveStreamWidget(rtsp_url)
+            self.video_display_layout.addWidget(self.live_stream_widget)
+
+        self.live_stream_widget.show()
+        self.is_live_stream_mode = True
+
+        # Hide video controls and overlays for live stream
+        self.video_controls_widget.hide()
+        self.detection_info_label.hide()
+
+    def is_datetime_timestamp(self, timestamp_str):
+        """Check if timestamp is a datetime string (live stream format)"""
+        if isinstance(timestamp_str, str) and len(timestamp_str) > 10:
+            # Live stream timestamps look like "20250903_170647_158121"
+            return "_" in timestamp_str and timestamp_str.replace("_", "").isdigit()
+        return False
+
+    def format_timestamp_for_display(self, timestamp):
+        """Format timestamp for display - handle both numeric and datetime string formats"""
+        if isinstance(timestamp, str) and self.is_datetime_timestamp(timestamp):
+            # Parse datetime string format: "20250903_170647_158121"
+            try:
+                date_part = timestamp[:8]  # "20250903"
+                time_part = timestamp[9:15]  # "170647"
+
+                year = date_part[:4]
+                month = date_part[4:6]
+                day = date_part[6:8]
+                hour = time_part[:2]
+                minute = time_part[2:4]
+                second = time_part[4:6]
+
+                return f"{day}/{month}/{year} {hour}:{minute}:{second}"
+            except:
+                return str(timestamp)
+        else:
+            # Numeric timestamp in seconds
+            return self.format_time(float(timestamp)) if timestamp else "00:00"
+
+    def load_results_for_selected_video(self):
+        selected = self.processed_video_list.currentItem()
+        if not selected:
+            return
+
+        selected_name = selected.text()
+
+        # Check if this is live stream
+        if selected_name == "live_stream":
+            self.show_live_stream_widget()
+        else:
+            self.show_video_widget()
+
+        video_dir = Path(OUTPUT_DIR) / selected_name
+        results_path = video_dir / RESULTS_JSON
+        if not results_path.exists():
+            return
+
+        with open(results_path, "r") as f:
+            data = json.load(f)
+        results = data.get("results", [])
+        self.detections = results
+
+        # Try to infer video size from first bbox (only for non-live stream)
+        if results and "bbox" in results[0] and not self.is_live_stream_mode:
+            max_x = max([b["bbox"][2] for b in results if "bbox" in b])
+            max_y = max([b["bbox"][3] for b in results if "bbox" in b])
+            self.video_native_size = (max_x, max_y)
+
         self.display_results(results, video_dir)
 
     def search_results(self):
@@ -1018,8 +1434,8 @@ class MainWindow(QMainWindow):
             image = entry.get("cropped_plate_path", "")
             detection_conf = entry.get("detection_confidence", 0.0)
 
-            # Format timestamp using the proper time format and confidence to 2 decimal places
-            timestamp_formatted = self.format_time(timestamp) if timestamp else "00:00"
+            # Format timestamp using the enhanced format function
+            timestamp_formatted = self.format_timestamp_for_display(timestamp)
             conf_formatted = f"{float(detection_conf):.2f}" if detection_conf else "0.00"
 
             # VRN column (editable)
@@ -1032,9 +1448,12 @@ class MainWindow(QMainWindow):
             raw_ocr_item.setFlags(raw_ocr_item.flags() & ~Qt.ItemIsEditable)
             self.results_table.setItem(i, 1, raw_ocr_item)
 
-            # Timestamp column (read-only)
+            # Timestamp column (read-only, no click action for live stream)
             timestamp_item = QTableWidgetItem(timestamp_formatted)
             timestamp_item.setFlags(timestamp_item.flags() & ~Qt.ItemIsEditable)
+            # Add visual indicator for non-clickable live stream timestamps
+            if self.is_live_stream_mode:
+                timestamp_item.setToolTip("Live stream timestamps are not seekable")
             self.results_table.setItem(i, 2, timestamp_item)
 
             # Display image thumbnail in table (read-only)
@@ -1114,6 +1533,10 @@ class MainWindow(QMainWindow):
 
     def on_result_cell_clicked(self, row, col):
         """Handle clicks on result table cells, seeking video for timestamp clicks."""
+        # Don't allow timestamp seeking in live stream mode
+        if self.is_live_stream_mode:
+            return
+
         # Only respond to timestamp column clicks (column 2)
         if col != 2:
             return
@@ -1129,6 +1552,11 @@ class MainWindow(QMainWindow):
         # This avoids rounding errors from the formatted display
         if row < len(self.current_results_data):
             exact_timestamp = self.current_results_data[row].get("timestamp", 0.0)
+
+            # Skip if this is a datetime string (live stream format)
+            if self.is_datetime_timestamp(str(exact_timestamp)):
+                return
+
             print(f"Using exact timestamp {exact_timestamp:.3f}s from detection data for row {row}")
         else:
             # Fallback to parsing the formatted timestamp
