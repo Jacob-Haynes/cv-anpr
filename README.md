@@ -33,7 +33,7 @@ This is a comprehensive license plate detection and recognition system built wit
 
 ### Clone the Repository
 ```bash
-git clone <repository-url>
+gh repo clone Jacob-Haynes/cv-anpr
 cd watchkeeper
 ```
 
