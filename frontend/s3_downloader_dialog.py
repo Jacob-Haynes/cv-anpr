@@ -37,8 +37,10 @@ class S3DownloadWorker(QObject):
 
     def start(self):
         """Start the download in a separate thread."""
+
         def run():
             try:
+
                 def callback(filename, percent, downloaded, total):
                     self.progress.emit(filename, percent, downloaded, total)
                     if self.cancelled:
@@ -149,7 +151,9 @@ class S3VideoDownloaderDialog:
             downloader = S3VideoDownloader()
             s3_videos = downloader.list_videos()
         except Exception as e:
-            QMessageBox.warning(self.parent, "S3 Error", f"Failed to list S3 videos:\n{e}")
+            QMessageBox.warning(
+                self.parent, "S3 Error", f"Failed to list S3 videos:\n{e}"
+            )
             return
 
         # Step 2: Show selection dialog

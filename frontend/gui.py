@@ -340,21 +340,19 @@ class MainWindow(QMainWindow):
                 return
             url = QUrl.fromLocalFile(str(video_path))
             self.media_player.setMedia(QMediaContent(url))
+
             def fit_video_to_view():
                 if not self.video_item.nativeSize().isEmpty():
                     view_size = self.graphics_view.size()
-                    target_width = min(
-                        view_size.width() - 20, 800
-                    )
-                    target_height = int(
-                        target_width / (16 / 9)
-                    )
+                    target_width = min(view_size.width() - 20, 800)
+                    target_height = int(target_width / (16 / 9))
                     self.video_item.setSize(QSizeF(target_width, target_height))
                     video_rect = self.video_item.boundingRect()
                     self.graphics_scene.setSceneRect(video_rect)
                     self.graphics_view.fitInView(video_rect, Qt.KeepAspectRatio)
                 else:
                     QTimer.singleShot(200, fit_video_to_view)
+
             QTimer.singleShot(100, fit_video_to_view)
             QTimer.singleShot(500, fit_video_to_view)
             QTimer.singleShot(1000, fit_video_to_view)
@@ -431,7 +429,10 @@ class MainWindow(QMainWindow):
         # --- Robust cleanup of live stream widget ---
         if self.live_stream_widget:
             try:
-                if hasattr(self.live_stream_widget, "thread") and self.live_stream_widget.thread:
+                if (
+                    hasattr(self.live_stream_widget, "thread")
+                    and self.live_stream_widget.thread
+                ):
                     try:
                         self.live_stream_widget.thread.stop()
                     except Exception as e:
@@ -445,7 +446,9 @@ class MainWindow(QMainWindow):
                 self.live_stream_widget = None
         # --- Ensure graphics view is in the layout and visible ---
         # Always add if not currently an item inside the layout (even if parent is set)
-        if not self._layout_contains_widget(self.video_display_layout, self.graphics_view):
+        if not self._layout_contains_widget(
+            self.video_display_layout, self.graphics_view
+        ):
             try:
                 self.video_display_layout.addWidget(self.graphics_view)
             except Exception as e:
@@ -457,11 +460,11 @@ class MainWindow(QMainWindow):
         self.video_controls_widget.show()
         self.detection_info_label.hide()
         self.clear_bounding_boxes()
-        if hasattr(self, 'overlay_timer') and self.overlay_timer.isActive():
+        if hasattr(self, "overlay_timer") and self.overlay_timer.isActive():
             self.overlay_timer.stop()
-        if hasattr(self, 'showing_selected_detection'):
+        if hasattr(self, "showing_selected_detection"):
             self.showing_selected_detection = False
-        if hasattr(self, 'selected_detection_row'):
+        if hasattr(self, "selected_detection_row"):
             self.selected_detection_row = None
         # --- Ensure media player is stopped and ready ---
         try:
@@ -535,22 +538,32 @@ class MainWindow(QMainWindow):
         for result in results:
             vrn = result.get("vrn", "")
             # Skip entries with corrupted VRN data (JSON strings, excessively long values)
-            if (isinstance(vrn, str) and
-                len(vrn) > 10 or
-                vrn.strip().startswith('{') or  # Skip JSON objects
-                vrn.strip().startswith('[') or  # Skip JSON arrays
-                '\n' in vrn):  # Skip multi-line content
-                print(f"Skipping corrupted detection entry with invalid VRN: {vrn[:100]}...")
+            if (
+                isinstance(vrn, str)
+                and len(vrn) > 10
+                or vrn.strip().startswith("{")  # Skip JSON objects
+                or vrn.strip().startswith("[")  # Skip JSON arrays
+                or "\n" in vrn
+            ):  # Skip multi-line content
+                print(
+                    f"Skipping corrupted detection entry with invalid VRN: {vrn[:100]}..."
+                )
                 continue
 
             # Ensure required fields exist and are valid
-            if (result.get("bbox") and
-                isinstance(result.get("bbox"), list) and
-                len(result.get("bbox")) == 4):
+            if (
+                result.get("bbox")
+                and isinstance(result.get("bbox"), list)
+                and len(result.get("bbox")) == 4
+            ):
                 filtered_results.append(result)
 
         self.detections = filtered_results
-        if filtered_results and "bbox" in filtered_results[0] and not self.is_live_stream_mode:
+        if (
+            filtered_results
+            and "bbox" in filtered_results[0]
+            and not self.is_live_stream_mode
+        ):
             max_x = max([b["bbox"][2] for b in filtered_results if "bbox" in b])
             max_y = max([b["bbox"][3] for b in filtered_results if "bbox" in b])
             self.video_native_size = (max_x, max_y)
@@ -679,6 +692,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             print(f"Error saving results: {e}")
             from PyQt5.QtWidgets import QMessageBox
+
             QMessageBox.warning(self, "Save Error", f"Failed to save results: {e}")
 
     def on_result_cell_clicked(self, row, col):
@@ -936,9 +950,7 @@ class MainWindow(QMainWindow):
                         {
                             "bbox": selected_detection.get("bbox", [0, 0, 0, 0]),
                             "vrn": selected_detection.get("vrn", ""),
-                            "color": QColor(
-                                0, 255, 0, 200
-                            ),
+                            "color": QColor(0, 255, 0, 200),
                         }
                     )
                 else:
@@ -954,9 +966,7 @@ class MainWindow(QMainWindow):
                         {
                             "bbox": det.get("bbox", [0, 0, 0, 0]),
                             "vrn": det.get("vrn", ""),
-                            "color": QColor(
-                                0, 255, 0, 200
-                            ),
+                            "color": QColor(0, 255, 0, 200),
                         }
                     )
         if boxes_to_show:
@@ -1131,9 +1141,7 @@ class MainWindow(QMainWindow):
                 QRectF(scaled_x1, scaled_y1, scaled_width, scaled_height)
             )
             pen = QPen(color)
-            pen.setWidth(
-                max(2, int(6 * min(scale_x, scale_y)))
-            )
+            pen.setWidth(max(2, int(6 * min(scale_x, scale_y))))
             rect_item.setPen(pen)
             self.graphics_scene.addItem(rect_item)
             self.bbox_items.append(rect_item)
@@ -1143,9 +1151,7 @@ class MainWindow(QMainWindow):
                 text_item.setPos(scaled_x1, text_y)
                 text_item.setBrush(QColor(255, 255, 255))
                 font = QFont()
-                font.setPointSize(
-                    max(12, int(24 * min(scale_x, scale_y)))
-                )
+                font.setPointSize(max(12, int(24 * min(scale_x, scale_y))))
                 font.setBold(True)
                 text_item.setFont(font)
                 self.graphics_scene.addItem(text_item)
@@ -1158,6 +1164,7 @@ class MainWindow(QMainWindow):
 
     def export_results_to_csv(self):
         from PyQt5.QtWidgets import QMessageBox
+
         selected = self.processed_video_list.currentItem()
         if not selected:
             QMessageBox.warning(self, "Export Error", "No processed video selected.")
@@ -1186,4 +1193,3 @@ class MainWindow(QMainWindow):
             )
         except Exception as e:
             QMessageBox.warning(self, "Export Error", f"Failed to export CSV:\n{e}")
-
